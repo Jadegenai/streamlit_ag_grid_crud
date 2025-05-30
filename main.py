@@ -1,9 +1,10 @@
-import streamlit as st
-import pandas as pd
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
-from snowflake.snowpark import Session
-from typing import Tuple, List, Dict, Any
 from datetime import datetime
+from typing import Tuple, List, Dict, Any
+
+import pandas as pd
+from snowflake.snowpark import Session
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+import streamlit as st
 
 # --- Snowflake session ---
 def get_snowflake_session() -> Session:
@@ -18,48 +19,82 @@ def get_snowflake_session() -> Session:
     }).create()
 
 # --- Reusable AG-Grid setup function ---
-def setup_aggrid(ag_grid_key:str, df: pd.DataFrame, edit_mode: bool = False, enable_selection: bool = False, pagination_size: int = 1) -> Dict[str, Any]:
+def setup_aggrid(
+    ag_grid_key: str,
+    df: pd.DataFrame,
+    edit_mode: bool = False,
+    enable_selection: bool = False,
+    pagination_size: int = 1
+) -> Dict[str, Any]:
     """
     Reusable function to configure AG-Grid with consistent settings
-    
+
     Args:
+        ag_grid_key: Unique key for the grid instance
         df: DataFrame to display
         edit_mode: Whether editing is enabled
         enable_selection: Whether row selection is enabled
         pagination_size: Number of rows per page
-    
+
     Returns:
         Dictionary with grid_options and other grid settings
     """
     gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_pagination(paginationPageSize=pagination_size)
-    
-    # Configure columns - make SALES_ACCOUNT_ID read-only always
+
+    # JavaScript to prevent duplicates in SALES_ACCOUNT_ID
+    unique_value_setter = JsCode("""
+        function(params) {
+            const newValue = params.newValue;
+            const field = params.colDef.field;
+            const allValues = [];
+
+            params.api.forEachNode(function(node) {
+                if (node !== params.node) {
+                    allValues.push(node.data[field]);
+                }
+            });
+
+            if (allValues.includes(newValue)) {
+                alert("Duplicate values are not allowed!");
+                return false;
+            }
+
+            params.data[field] = newValue;
+            return true;
+        }
+    """)
+
+    # Configure columns
     for col in df.columns:
-        if col in ('index'):
+        if col == 'index':
             gb.configure_column(col, header_name="", editable=False, pinned='left', cellStyle={'color': '#0000'})
+        elif col == 'SALES_ACCOUNT_ID':
+            gb.configure_column(col, editable=edit_mode, resizable=True, valueSetter=unique_value_setter)
         else:
             gb.configure_column(col, editable=edit_mode, resizable=True)
-    
+
     if enable_selection:
         gb.configure_selection("multiple", use_checkbox=True)
-    
+
     gb.configure_grid_options(domLayout='normal')
-    
+
     custom_css = {
-                        ".ag-row-even": {"background-color": "#f0f0f0"},
-                        ".ag-row-odd": {"background-color": "#ffffff"},
-                        ".ag-header-cell": {"background-color": "#175388",
-                                            "color": "white"}
-                    }
-    
+        ".ag-row-even": {"background-color": "#f0f0f0"},
+        ".ag-row-odd": {"background-color": "#ffffff"},
+        ".ag-header-cell": {
+            "background-color": "#175388",
+            "color": "white"
+        }
+    }
+
     return {
         'grid_options': gb.build(),
         'update_mode': GridUpdateMode.MODEL_CHANGED if edit_mode else GridUpdateMode.NO_UPDATE,
         'allow_unsafe_jscode': True,
         'height': 400,
         'theme': 'streamlit',
-        'custom_css': custom_css, 
+        'custom_css': custom_css,
         'key': ag_grid_key
     }
 
@@ -215,6 +250,7 @@ def main() -> None:
     active_df.sort_values("index",inplace=True)
     if "current_aggrid_version" not in st.session_state:
         st.session_state.current_aggrid_version = 1
+    
     grid_config = setup_aggrid("current", active_df, edit_mode=edit_mode, enable_selection=edit_mode)
     
     # Display the grid
