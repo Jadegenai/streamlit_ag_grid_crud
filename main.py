@@ -150,7 +150,6 @@ def compare_dataframes_v2(original_df, df_to_compare, id_column):
     
     return comparison_result, comparison_result_v2
 
-
 def generate_update_statement(table_name: str, non_id_columns: List[str], id_column: str = "id = ?") -> str:
     set_clause = ", ".join(f"{col} = ?" for col in non_id_columns)
     update_statement = f"UPDATE {table_name} SET {set_clause} WHERE {id_column} = ?;"
@@ -283,71 +282,48 @@ def main() -> None:
                 #     skip_ids.extend(duplicate_ids)
                 #     st.error(f"Duplicate IDs found: {duplicate_ids}. These will be skipped from saving.")
 
-                # --- Deletions ---
+                # --- Find Modified Items ---
+                df_to_compare = pd.DataFrame(grid_response["data"])
+                df_to_compare = df_to_compare.loc[~df_to_compare["index"].isin(inserted_row_ids)]
+
                 # Construct SQL DELETE query for Snowflake
+                comparison = compare_dataframes(
+                    st.session_state.undeleted_original_df,
+                    df_to_compare,
+                    inserted_row_ids
+                )
+
+                modified_indices = comparison.reset_index()["index"].to_list()  
+
+                # --- Deletions ---
                 deleted_ids = st.session_state.deleted_indices
+                
+                deleted_ids += modified_indices
                 if deleted_ids:
                     deleted_id_column_values = st.session_state.original_df.loc[st.session_state.original_df["index"].isin(deleted_ids)][id_column]
                     delete_query = f"""
                     DELETE FROM {table_name}
                     WHERE {id_column} IN ({','.join([f"'{id}'" for id in deleted_id_column_values])});
                     """
-                    # st.success(delete_query)
                     session.sql(delete_query).collect()
-                    # Execute this query using your Snowflake connection
-                    # Example: conn.cursor().execute(delete_query)
-                            
-                # --- Find Modified Items ---
-                df_to_compare = pd.DataFrame(grid_response["data"])
-                df_to_compare = df_to_compare.loc[~df_to_compare["index"].isin(inserted_row_ids)]
 
-                # st.success(st.session_state.undeleted_original_df.columns.index)
-                # st.success(type(df_to_compare))
-
-                comparison, comparison_v2 = compare_dataframes_v2(
-                    st.session_state.undeleted_original_df,
-                    df_to_compare,
-                    id_column
-                )
-
-                # Extract modified IDs
-                modified_indices = comparison.reset_index()["index"].to_list()  
+                # -- Insertions                            
                 edits_df = pd.DataFrame(grid_response["data"])
-                     
-                if len(modified_indices) > 0:
-                    modified_id_items = comparison_v2.reset_index()["index"].to_list()
-                    if len(modified_id_items) > 0:
-                        modified_id_items_id_column_values = st.session_state.original_df.loc[st.session_state.original_df["index"].isin(modified_id_items)][["index",id_column]].applymap(lambda x: str(x))
-                        modified_id_items_id_column_new_values = edits_df.loc[edits_df["index"].isin(modified_id_items)][["index",id_column]].applymap(lambda x: str(x))
-
-                        modified_and_original_id = modified_id_items_id_column_new_values.set_index("index").join(modified_id_items_id_column_values.set_index("index"),how="inner",rsuffix="_r").set_index(id_column)
-
-                        for pairing in modified_and_original_id.to_records():
-                            session.sql(f"""UPDATE {table_name}
-                                SET {id_column} = ?
-                                WHERE {id_column} = ?""",params=list(pairing)).collect()
-                        
-                    
-                    modified_ready_df = edits_df.loc[edits_df["index"].isin(modified_indices)].drop("index",axis=1).applymap(format_updates)
-                    # Move the id column to the end
-                    non_id_columns = [x for x in modified_ready_df.columns if x != id_column]
-                    modified_ready_df = modified_ready_df[non_id_columns + [id_column]]
-                    update_statement = generate_update_statement(table_name,non_id_columns,id_column)
-                    
-                    for _, update_values in modified_ready_df.iterrows():
-                        session.sql(update_statement,params=list(update_values)).collect() 
-                    
+                modified_inserts_df = edits_df.loc[edits_df["index"].isin(modified_indices)]
+                modified_inserts_df.drop("index", axis=1, inplace=True)
                 inserted_df = edits_df.loc[edits_df["index"].isin(inserted_row_ids)].applymap(format_updates)
                 inserted_df.drop("index",axis=1,inplace=True)
-                insert_statement = f"""INSERT INTO {table_name} VALUES ({",".join(["?"] * len(inserted_df.columns))})"""
-                for _, row in inserted_df.iterrows():
-                    session.sql(insert_statement,row.to_list()).collect()
+                if not inserted_df.empty or not modified_inserts_df.empty: 
+                    inserted_df = pd.concat([inserted_df,modified_inserts_df])
+                    st.dataframe(inserted_df)
+                    snowpark_df = session.create_dataframe(inserted_df)
+                    snowpark_df.write.save_as_table(table_name, mode="append")
 
                 session.close()
                 load_all_data.clear()
                 st.session_state.deleted_indices = []
                 st.session_state.inserted_rows = []
-                # st.rerun()
+                st.rerun()
 
         with col4:
             reset_changes(not edit_mode)
