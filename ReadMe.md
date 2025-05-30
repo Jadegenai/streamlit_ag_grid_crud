@@ -1,0 +1,3 @@
+- See about seeing what page one is on to not have to check as much information for modificatinos
+- Smaller pulls...probably not really a concern
+- Secondary delete and insert statements that allow for fewer transactions.
